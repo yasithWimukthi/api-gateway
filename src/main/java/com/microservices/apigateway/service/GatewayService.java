@@ -15,119 +15,161 @@ import java.util.UUID;
 public class GatewayService {
 
     private final LogSender logSender;
+    private final RestTemplate restTemplate;
 
     private static final String SERVICE = "api-gateway";
 
-    private final RestTemplate restTemplate;
-
-    public String createOrder(String failure) {
+    public String createOrder(String failure, int duration) {
 
         String requestId = UUID.randomUUID().toString();
-
         long start = System.currentTimeMillis();
 
-        log.info("service={} requestId={} event=request_received",
-                SERVICE, requestId);
+        // =========================
+        // REQUEST RECEIVED
+        // =========================
+        sendLog("INFO", "request_received", requestId, null, null);
 
-        logSender.send(new LogEvent(
-                Instant.now().toString(),
-                "api-gateway",
-                "INFO",
-                "request_received",
-                requestId,
-                null,
-                null
-        ));
-
+        boolean success = false;
 
         try {
 
-            log.info("service={} requestId={} event=forward_to_order_service",
-                    SERVICE, requestId);
-
-            logSender.send(new LogEvent(
-                    Instant.now().toString(),
-                    "api-gateway",
-                    "INFO",
-                    "forward_to_order_service",
-                    requestId,
-                    null,
-                    null
-            ));
+            // =========================
+            // FORWARD TO ORDER SERVICE
+            // =========================
+            sendLog("INFO", "forward_to_order_service", requestId, null, null);
 
             String url = "http://localhost:8082/orders";
 
             if (failure != null) {
-                url += "?failure=" + failure;
+                url += "?failure=" + failure + "&duration=" + duration;
             }
 
-            restTemplate.postForObject(
-                    url,
-                    null,
-                    String.class
+            long orderStart = System.currentTimeMillis();
+
+            // 🔁 Retry logic
+            int retries = 0;
+            while (retries < 2) {
+                try {
+                    restTemplate.postForObject(url, null, String.class);
+                    success = true;
+                    break;
+
+                } catch (Exception ex) {
+
+                    retries++;
+
+                    sendLog("WARN", "order_retry_attempt",
+                            requestId,
+                            null,
+                            "Retry attempt " + retries
+                    );
+
+                    Thread.sleep(200);
+                }
+            }
+
+            long orderLatency = System.currentTimeMillis() - orderStart;
+
+            sendLog("INFO", "order_service_latency",
+                    requestId,
+                    orderLatency,
+                    null
             );
 
-            log.info("service={} requestId={} event=order_success",
-                    SERVICE, requestId);
-
-            logSender.send(new LogEvent(
-                    Instant.now().toString(),
-                    "api-gateway",
-                    "INFO",
-                    "order_success",
-                    requestId,
-                    null,
-                    null
-            ));
+            if (success) {
+                sendLog("INFO", "order_success", requestId, null, null);
+            } else {
+                sendLog("ERROR", "order_failure",
+                        requestId,
+                        orderLatency,
+                        "Order failed after retries"
+                );
+            }
 
         } catch (Exception e) {
 
-            log.error("service={} requestId={} event=gateway_failure error={}",
-                    SERVICE, requestId, e.getMessage());
-
-            logSender.send(new LogEvent(
-                    Instant.now().toString(),
-                    "api-gateway",
-                    "ERROR",
-                    "gateway_failure",
+            sendLog("ERROR", "gateway_failure",
                     requestId,
                     null,
                     e.getMessage()
-            ));
+            );
 
-            throw e;
+            sendLog("ERROR", "request_completed_failure",
+                    requestId,
+                    null,
+                    e.getMessage()
+            );
+
+            throw new RuntimeException(e);
         }
 
+        // =========================
+        // TOTAL LATENCY
+        // =========================
         long latency = System.currentTimeMillis() - start;
 
         if (latency > 1000) {
-            log.warn("service={} requestId={} event=slow_response latency={}",
-                    SERVICE, requestId, latency);
+            sendLog("WARN", "slow_response",
+                    requestId,
+                    latency,
+                    "Gateway response slow"
+            );
+        }
 
-            logSender.send(new LogEvent(
-                    Instant.now().toString(),
-                    "api-gateway",
-                    "WARN",
-                    "slow_response",
+        // =========================
+        // RANDOM DEGRADATION SIGNAL
+        // =========================
+        if (Math.random() < 0.2) {
+            sendLog("WARN", "gateway_degradation",
+                    requestId,
+                    null,
+                    "Observed slight degradation"
+            );
+        }
+
+        // =========================
+        // FINAL STATUS
+        // =========================
+        if (success) {
+            sendLog("INFO", "request_completed_success",
                     requestId,
                     latency,
                     null
-            ));
+            );
+        } else {
+            sendLog("ERROR", "request_completed_failure",
+                    requestId,
+                    latency,
+                    "Final failure at gateway"
+            );
         }
 
-        log.info("service={} requestId={} event=response_sent latency={}",
-                SERVICE, requestId, latency);
-
-        logSender.send(new LogEvent(
-                Instant.now().toString(),
-                "api-gateway",
-                "INFO",
-                "response_sent",
+        sendLog("INFO", "response_sent",
                 requestId,
                 latency,
                 null
-        ));
+        );
 
-        return "success";
+        return success ? "success" : "failed";
+    }
+
+    // =========================
+    // LOG HELPER
+    // =========================
+    private void sendLog(String level,
+                         String event,
+                         String requestId,
+                         Long latency,
+                         String error) {
+
+        logSender.send(new LogEvent(
+                Instant.now().toString(),
+                SERVICE,
+                level,
+                event,
+                requestId,
+                latency,
+                error
+        ));
     }
 }

@@ -17,8 +17,9 @@ public class GatewayController {
 
     @PostMapping("/create-order")
     public ResponseEntity<String> createOrder(
-            @RequestParam(required = false) String failure
+            @RequestParam(required = false) String failure,
+            @RequestParam(required = false, defaultValue = "100") int duration
     ) {
-        return ResponseEntity.ok(gatewayService.createOrder(failure));
+        return ResponseEntity.ok(gatewayService.createOrder(failure, duration));
     }
 }
